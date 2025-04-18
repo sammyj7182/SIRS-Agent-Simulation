@@ -1,0 +1,424 @@
+# -*- coding: utf-8 -*-
+"""
+Spyder Editor
+
+SIRS Modelling - Real Geography Representation
+"""
+#%% 1.) Import modules 
+import matplotlib.pyplot as plt # Plotting
+import numpy as np # Maths
+from matplotlib.animation import FuncAnimation #Animation
+from matplotlib.lines import Line2D
+
+#%% Step 1: Define Geography of our space
+places = {
+    'City1': np.array([0.2, 0.3]),
+    'City2': np.array([0.7, 0.4]),
+    'Town1': np.array([0.4, 0.8]),
+    'Town2': np.array([0.8, 0.2]),
+    'Town3': np.array([0.8, 0.8]),
+    'Town4': np.array([0.4, 0.4]),
+}
+
+#%% Added: Radius of influence per location
+place_radii = {
+    'City1': 0.1,
+    'City2': 0.105,
+    'Town1': 0.07,
+    'Town2': 0.075,
+    'Town3': 0.065,
+    'Town4': 0.0675
+}
+
+#%% Define SIRS parameters
+params = {
+    'beta': 0.5, #Infection rate S-> I
+    'gamma': 0.1, # Recovery Rate I-> R
+    'delta': 0.01 # loss of immunity rate R-> S
+}
+
+#%% Define probability of movement per timestep
+travel_prob = 0.05
+
+##% Empty list for movement logging
+movement_log = []
+
+
+#%% Step 3: Adding in our agents to these locations 
+
+# Define some total number of agents
+
+N_agents = 200
+
+# Calculate the area weights for proportional distribution 
+
+weights = {name: np.pi * r**2 for name,r in place_radii.items()} # loops through place_radii and weights 
+total_weight = sum(weights.values())
+
+
+# Allocate based on weighting using area from above
+agent_counts = {
+                name : int(N_agents * (area/ total_weight)) for name, area in weights.items()
+                }
+
+# Fix any rounding issues 
+while sum(agent_counts.values()) < N_agents:
+    # Add 1 to the largest area until the total matches the total number of agents 
+    largest = max(agent_counts, key = lambda k:weights[k]) ## what is this doing? 
+    agent_counts[largest] += 1
+    
+#Now we want to find a random point in our circle to place our agents 
+def random_point_in_circle(centre, radius):
+    """ 
+    Parameters
+    ----------
+    centre : list
+        2D list of location of centre of place
+    radius : float
+        radius of "influence" of my giving place
+        
+    Returns
+    -------
+    Coordinates of random point in circle
+
+    """
+    r = radius * np.sqrt(np.random.rand())
+    theta = 2 * np.pi * np.random.rand()
+    x = centre[0] + r * np.cos(theta)
+    y = centre[1] + r * np.sin(theta)
+    
+    return[x,y]
+
+# generate agents and associated locations
+agents = []
+agent_id = 0
+
+# Loop through agent_counts.items
+for place, count in agent_counts.items():
+    centre = places[place]
+    radius = place_radii[place]
+    
+    # loop through each value in count to account for each agent
+    for _ in range(count):
+        #define the location of my agemt
+        location = random_point_in_circle(centre, radius)
+        agent = {
+            'id' : agent_id,
+            'location': location,
+            'place': place,
+            'home_place': place,             # Their original home
+            'current_place': place,          # Where they are *now*
+            'is_traveling': False,
+            'travel_timer': 0,
+            'state': 'S', #susceptible by default
+            'infection_time': None #For tracking infection
+            }
+        agents.append(agent)
+        agent_id += 1
+        
+# Randomly select some agents to be infected 
+
+# Infect a small number of agents 
+initial_infections = 10
+infected_agents = np.random.choice(agents, size = initial_infections, replace = False)
+
+
+# for my infected agents update the state and set infection_time = 0
+for agent in infected_agents:
+    agent['state'] = 'I'
+    agent['infection_time']= 0 #Increment this each timestep
+    
+    
+#%% Initialise the local state counts per place 
+# Start at zeroes
+place_state_counts = {place: {'S':0, 'I':0, 'R':0} for place in places}
+
+for agent in agents:
+    place_state_counts[agent['current_place']][agent['state']] += 1
+
+
+#%% Add in a simple random walk bounded by the place 
+def random_walk_within_circle(agent_pos, centre, radius, step_size=0.01):
+    for _ in range(10):  # max retries
+        dx, dy = np.random.uniform(-step_size, step_size, 2)
+        new_pos = agent_pos + np.array([dx, dy])
+        if np.linalg.norm(new_pos - centre) <= radius:
+            return new_pos
+    return agent_pos  # fallback: no move
+
+
+# %% inter-place transmission function 
+
+def inter_place_transmission(place_a, place_b,params, places, place_radii, place_state_counts):
+    """   
+    Function to compute the transmission rate between place A and B 
+    Parameters
+    ----------
+    place_a : string
+        place a name.
+    place_b : string
+        place b name.
+    params : list
+        selection of parameters that define transmission.
+    places : dictionary
+        dictionary of all my places.
+    place_radii : float
+        radii of the places .
+    place_state_counts : dictionary
+        list of places and associated SIR states.
+
+    Returns
+    -------
+    None.
+
+    """    
+    #get the centre of the places 
+    centre_a = places[place_a]
+    centre_b = places[place_b]
+    
+    # distance between 2 centres
+    distance = np.linalg.norm(centre_a - centre_b)
+    
+    # get the population sizes and infected counts 
+    pop_a = sum(place_state_counts[place_a].values())
+    infected_a = place_state_counts[place_a]['I']
+    
+    pop_b = sum(place_state_counts[place_b].values())
+    infected_b = place_state_counts[place_b]['I']
+    
+    # Calculate the infection probabilities (infection rate based on % infected and distance)
+    infected_percentage_a = infected_a / pop_a if pop_a > 0 else 0
+    infected_percentage_b = infected_b / pop_b if pop_b > 0 else 0
+    
+    # Define infection percentages    
+    density_ratio = (pop_a / np.pi / place_radii[place_a]**2) / (pop_b / np.pi / place_radii[place_b]**2)      
+    
+    # Compute transmission rate
+    beta = params['beta'] *  infected_percentage_a * infected_percentage_b
+    
+    # Distance factor: smaller distances lead to higher transmission rates
+    distance_factor = np.exp(-distance)  # Transmission probability decreases with distance
+    
+    # Population density adjustment (higher density of A relative to B = lower transmission)
+    density_factor = max(0.1, 1 / (1 + np.log(np.abs(density_ratio) + 1)))  # Higher values = less transmission
+    
+    # Final transmission probability between places A and B
+    transmission_prob = beta * distance_factor * density_factor
+    
+    return transmission_prob
+    
+# Create a dictionary to keep track of transmissions between places
+transmission_count = {f"{place_a}-{place_b}": 0 for place_a in places for place_b in places if place_a != place_b}
+    
+# %% visualise graphical change
+
+sir_history = {
+    'S': [],
+    'I': [],
+    'R': []
+}
+        
+#%% Visualise my agents in an animation
+
+fig, (ax_map, ax_plot) = plt.subplots(1, 2, figsize=(14, 6))  # 1 row, 2 columns
+
+# Use ax_map for your geography visualization
+ax = ax_map  # Replace other 'ax' references in your code accordingly
+
+# Draw my place circles
+circles = []
+for name, coord in places.items(): 
+    ax.plot(coord[0], coord[1],'o', label = name, markersize = 8)
+    ax.text(coord[0]+ 0.01, coord[1]+0.01, name, fontsize = 12)
+    circle = plt.Circle(coord, place_radii[name], color = 'gray', alpha = 0.2)
+    ax.add_patch(circle)
+    circles.append(circle)
+
+#Define some scatter plot for my agents 
+agent_scatter = ax.scatter([agent['location'][0] for agent in agents],
+                           [agent['location'][1] for agent in agents],
+                           c = [{'S': 'black', 'I':'red','R':'green'}[agent['state']] for agent in agents],
+                           s = 8) # use location from dictionary
+
+#Add in a manual legend for my scatter plot as well
+legend_elements = [
+    Line2D([0], [0], marker='o', color='w', label='Susceptible', markerfacecolor='blue', markersize=6),
+    Line2D([0], [0], marker='o', color='w', label='Infected', markerfacecolor='red', markersize=6),
+    Line2D([0], [0], marker='o', color='w', label='Recovered', markerfacecolor='green', markersize=6)
+]
+ax.legend(handles=legend_elements, loc='upper right')
+
+
+# Add these to the plot
+ax.set_xlim(0,1)
+ax.set_ylim(0,1)
+ax.set_aspect('equal')
+ax.set_title("Agents distribution within a simple geography")
+ax.legend()
+plt.grid(True)
+
+#%% SIR Line Plot
+# Prepare the SIR line plot
+line_S, = ax_plot.plot([], [], 'b-', label='Susceptible')
+line_I, = ax_plot.plot([], [], 'r-', label='Infected')
+line_R, = ax_plot.plot([], [], 'g-', label='Recovered')
+
+ax_plot.set_xlim(0, 150)  # Match number of frames
+ax_plot.set_ylim(0, N_agents)
+ax_plot.set_title("SIR Populations Over Time")
+ax_plot.set_xlabel("Time Step")
+ax_plot.set_ylabel("Number of Agents")
+ax_plot.legend()
+
+# define a function to update the location of our agents based on our random walk 
+#%% Update function with SIRS dynamics
+def update(frame):
+    
+    # This tracks my travelling
+    for agent in agents:
+        if not agent['is_traveling']:
+            # Pick a random value and if less than travel_prob then travel
+            if np.random.rand() < travel_prob:
+            # Choose a destination different from home
+                destinations = [p for p in places if p != agent['home_place']] # pick a list of destinations
+                destination = np.random.choice(destinations) #pick a random destination
+                agent['current_place'] = destination #update destination with new place
+                agent['is_traveling'] = True #change boolean value
+                agent['travel_timer'] = np.random.randint(2, 5)  # stay for 2-4 frames
+                #If moving log in my list
+                # ✨ Log the movement
+                movement_log.append({
+                'agent_id': agent['id'],
+                'from': agent['current_place'],
+                'to': destination,
+                'frame': frame
+                })
+                
+        else:
+            agent['travel_timer'] -= 1
+            if agent['travel_timer'] <= 0:
+                #Log movement again
+                movement_log.append({
+                'agent_id': agent['id'],
+                'from': agent['current_place'],
+                'to': agent['home_place'],
+                'frame': frame
+                })
+                # Return home
+                agent['current_place'] = agent['home_place']
+                agent['is_traveling'] = False
+    
+    for agent in agents:
+        # Movement
+        centre = places[agent['current_place']]
+        radius = place_radii[agent['current_place']]
+        agent['location'] = random_walk_within_circle(
+            np.array(agent['location']),
+            centre,
+            radius)
+        
+    # Track infection time 
+    # Increment infection time for infected agents
+    for agent in agents:
+        if agent['state'] == 'I':
+            if agent['infection_time'] is None:
+                agent['infection_time'] = 0
+            else:
+                agent['infection_time'] += 1
+     
+
+    
+    # Local SIRS Gillespie-style update per place
+    for place in places:
+        counts = place_state_counts[place]
+        S, I, R = counts['S'], counts['I'], counts['R']
+        N = S + I + R
+        if N == 0 or I == 0:
+            continue  # nothing to do
+
+        # Compute rates
+        rate_infect = params['beta'] * S * I / N
+        rate_recover = params['gamma'] * I
+        rate_lose_immunity = params['delta'] * R
+        total_rate = rate_infect + rate_recover + rate_lose_immunity
+
+        # This would imply no individuals or all params = 0 feels an odd addition 
+        if total_rate == 0:
+            continue
+
+        # Choose which event
+        rand = np.random.rand() * total_rate
+        if rand < rate_infect and S > 0:
+            # Infect one susceptible agent
+            s_agents = [a for a in agents if a['place'] == place and a['state'] == 'S']
+            chosen = np.random.choice(s_agents)
+            chosen['state'] = 'I'
+            counts['S'] -= 1
+            counts['I'] += 1
+        elif rand < rate_infect + rate_recover and I > 0:
+            # Recover one infected agent
+            i_agents = [a for a in agents if a['place'] == place and a['state'] == 'I']
+            chosen = np.random.choice(i_agents)
+            chosen['state'] = 'R'
+            counts['I'] -= 1
+            counts['R'] += 1
+            chosen['infection_time'] = None # Update infection time to be none once recovered 
+        elif R > 0:
+            # Lose immunity
+            r_agents = [a for a in agents if a['place'] == place and a['state'] == 'R']
+            chosen = np.random.choice(r_agents)
+            chosen['state'] = 'S'
+            counts['R'] -= 1
+            counts['S'] += 1
+    for place_a in places:
+        for place_b in places:
+            if place_a != place_b:
+                transmission_prob = inter_place_transmission(place_a, place_b, params, places, place_radii, place_state_counts)
+
+                # If transmission happens, infect a random susceptible agent in place B
+                if np.random.rand() < transmission_prob:
+                    # Find a susceptible agent in place B
+                    s_agents_b = [a for a in agents if a['place'] == place_b and a['state'] == 'S']
+                    if len(s_agents_b) > 0:
+                        chosen_b = np.random.choice(s_agents_b)
+                        chosen_b['state'] = 'I'
+                        place_state_counts[place_b]['S'] -= 1
+                        place_state_counts[place_b]['I'] += 1
+                        
+                        # Increment the transmission count between place_a and place_b
+                        transmission_count[f"{place_a}-{place_b}"] += 1
+    # Update scatter plot colors
+    color_map = {'S': 'blue', 'I': 'red', 'R': 'green'}
+    agent_colors = [color_map[agent['state']] for agent in agents]
+    agent_scatter.set_offsets([agent['location'] for agent in agents])
+    agent_scatter.set_color(agent_colors)
+    
+    # Stop if no infected agents remain
+    if not any(agent['state'] == 'I' for agent in agents):
+        print(f"Stopped at frame {frame}: no more infected agents.")
+        anim.event_source.stop()           
+ 
+    # Track global S, I, R
+    S_total = sum(place_state_counts[place]['S'] for place in places)
+    I_total = sum(place_state_counts[place]['I'] for place in places)
+    R_total = sum(place_state_counts[place]['R'] for place in places)
+
+    sir_history['S'].append(S_total)
+    sir_history['I'].append(I_total)
+    sir_history['R'].append(R_total)
+
+    # Update the SIR line plot
+    line_S.set_data(range(len(sir_history['S'])), sir_history['S'])
+    line_I.set_data(range(len(sir_history['I'])), sir_history['I'])
+    line_R.set_data(range(len(sir_history['R'])), sir_history['R'])
+    
+    return (agent_scatter, line_S, line_I, line_R)
+
+
+# run animation
+anim = FuncAnimation(fig, update, 
+                     frames = 200, # run for 100 'timesteps'
+                     interval = 100, 
+                     blit = False) # only re-draws upon change, performance boost
+plt.show()
+
